@@ -55,6 +55,13 @@ Or use the helper: `python3 tools/send_sim.py --url https://YOUR-APP.vercel.app/
 - `source` must be `"LIVE"` for LIVE badges. Missing, or anything else, shows SIM. A packet that is missing a payload channel is always shown as SIM and the banner says which field is missing.
 - `seq` or `t` lets the page skip repeated packets and show STALE when the feed stops (after about 10 s).
 - Also accepted: `uv`, `field_uT`, `dB`, `temp`, `cpm`, `flare`.
+- Optional device health, shown under Channels: `device` (text, e.g. `"falconeye-esp32"`), `rssi` (Wi-Fi signal, dBm), `uptime_s` (seconds since boot).
+- A failed sensor: leave its field out. Do not send 0. The packet is then shown as SIM and the banner names the missing field.
+
+### Fault rules
+- **Out of range:** UV outside 0 to 15, field change outside ±100 µT, temperature outside −40 to 85 °C, gamma outside 0 to 1000 CPM, flare outside 0 to 100. The value is not used: the gauge reads FAULT, the status strip shows FAULT, and the timeline logs it.
+- **Stuck sensor:** the same non-zero value 15 readings in a row. Flagged the same way. Zero is exempt (UV is 0 in the dark).
+- **Link lost:** no new packet for 10 s (or 3 poll intervals, if longer). The telemetry dims, a NO LINK note shows the packet age, and the timeline logs "Link lost" and later "Link restored".
 
 ### Tinkercad
 Tinkercad cannot post to the internet. Have the Arduino print one JSON line per reading, tag it `"source":"SIM"` (it is a simulation), copy the serial monitor output, and use **Paste JSON**:
@@ -73,11 +80,18 @@ Use `"LIVE"` only for real sensors on the bench. For those, run `python3 tools/s
 - **Globe:** dot-matrix Earth with day and night from the real sun position. The orbit ring is decorative and the satellite dot takes the alert colour. Orbit, gamma and flare inputs and the LoRa link are simulated.
 - Under each gauge: minimum, average and maximum of the readings on the charts.
 
-## 4. Lock the endpoint (recommended)
+## 4. Storage on Vercel (do this before the demo)
+Without a store, the latest reading lives in one serverless instance's memory, and the dashboard can read from a different instance and see nothing. To fix it:
+1. In Vercel: Project → Storage (or Marketplace) → add **Upstash Redis** (free tier) and connect it to this project.
+2. Check that Project → Settings → Environment Variables now has `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`. If the integration named them differently (for example `KV_REST_API_URL`), add these two names with the same values.
+3. Redeploy. Post a reading, then open `/api/telemetry` in a private window: it should return that reading.
+If the store is unreachable, the endpoint answers HTTP 503 with the reason instead of silently losing data.
+
+## 5. Lock the endpoint (recommended)
 Without a key, anyone who knows the address can post readings. In Vercel: Project → Settings → Environment Variables, add `INGEST_KEY` with a long random value, then redeploy. Senders must then include the header `x-api-key: <value>` (`--key` in `send_sim.py`). Reading (GET) stays open so the dashboard can poll.
 
-## 5. Known limits
-- `/api/telemetry` keeps only the latest reading, in the function's memory. Fine for a single-user demo; serverless memory is not guaranteed to persist. If readings vanish, replace the `latest` variable with Vercel KV or Upstash Redis.
+## 6. Known limits
+- `/api/telemetry` keeps only the latest reading. The dashboard polls it, so if the ESP32 sends faster than the dashboard polls, some readings are not shown. Keep both at 2 s.
 - History on the charts lives in the browser tab and resets on reload.
 - Orbit globe, gamma and flare inputs, and the LoRa link are simulated and labelled as such. Nothing is transmitted over radio.
 - Magnetic baseline (50 µT) and thresholds are placeholders; confirm them before Phase 2.

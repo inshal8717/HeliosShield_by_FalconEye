@@ -36,7 +36,9 @@ let lastLoraAtMs = 0, lastSentLevel = "NORMAL";
 let modeStart = Date.now();
 let simTimer = null, pollTimer = null, pollBusy = false;
 let history = [];                // every reading this session, for the CSV export
-const feed = { url: "", every: 2, lastPktAt: 0, lastKey: null, lastErr: "", count: 0, manual: false };
+const FLAT_N = 15;                 // the same non-zero value this many readings in a row = stuck sensor
+const freshFlat = () => ({ uv: { v: null, n: 0 }, dB: { v: null, n: 0 }, temp: { v: null, n: 0 } });
+const feed = { url: "", every: 2, lastPktAt: 0, lastKey: null, lastErr: "", count: 0, manual: false, fault: [], health: null, flat: freshFlat(), faultSig: "", wasStale: false };
 
 /* ---- Simulation (per second, k counts from the start of the chosen event) ---- */
 function gauss() { return (Math.random() + Math.random() + Math.random() - 1.5) * 2; }
@@ -88,12 +90,20 @@ function carry(field, fallback) {
   for (let i = series.length - 1; i >= 0; i--) if (Number.isFinite(series[i][field])) return series[i][field];
   return fallback;
 }
+// Physical limits for a payload reading. Outside these, a value is a failed reading, not data.
+const RANGE = { uv: [0, 15], dB: [-100, 100], temp: [-40, 85], cpm: [0, 1000], flare: [0, 100] };
+const num = v => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v))) ? null : Number(v);
+
 function normalize(o) {
   if (!o || typeof o !== "object" || Array.isArray(o)) return null;
   const found = {};
   let any = false;
   for (const f in KEYS) { found[f] = pick(o, KEYS[f]); if (found[f] !== null) any = true; }
   if (!any) return null;
+  const invalid = [];
+  for (const f in RANGE) {
+    if (found[f] !== null && (found[f] < RANGE[f][0] || found[f] > RANGE[f][1])) { invalid.push({ f, v: found[f] }); found[f] = null; }
+  }
   const fill = {
     uv: carry("uv", 0), dB: carry("dB", 0), temp: carry("temp", 25),
     cpm: BASE_CPM + SIG * gauss(), flare: 15 + 3 * gauss()
@@ -104,11 +114,17 @@ function normalize(o) {
   }
   s.uv = Math.max(0, s.uv); s.dB = Math.abs(s.dB); s.cpm = Math.max(0, s.cpm);
   s.flare = Math.max(0, Math.min(100, s.flare));
-  const missingPayload = PAYLOAD_FIELDS.filter(f => found[f] === null).map(f => CANON[f]);
-  // LIVE only when the sender says so and every payload channel is really in the packet.
-  const src = String(o.source || "").toUpperCase() === "LIVE" && !missingPayload.length ? "LIVE" : "SIM";
+  const invalidSet = new Set(invalid.map(i => i.f));
+  const missingPayload = PAYLOAD_FIELDS.filter(f => found[f] === null && !invalidSet.has(f)).map(f => CANON[f]);
+  // LIVE only when the sender says so and every payload channel is present and valid.
+  const anyBad = PAYLOAD_FIELDS.some(f => found[f] === null);
+  const src = String(o.source || "").toUpperCase() === "LIVE" && !anyBad ? "LIVE" : "SIM";
   const key = o.seq !== undefined ? "seq:" + o.seq : (o.t !== undefined ? "t:" + o.t : null);
-  return { s, src, filled, missingPayload, key };
+  const health = {
+    device: typeof o.device === "string" ? o.device.slice(0, 40) : null,
+    rssi: num(o.rssi), uptime_s: num(o.uptime_s), seq: o.seq ?? null
+  };
+  return { s, src, filled, missingPayload, key, invalid, found, health };
 }
 
 /* ---- Channel evaluation ---- */
@@ -135,6 +151,10 @@ function reasonFor(chans, level) {
 
 function addLog(time, from, to, reason) {
   logRows.unshift({ kind: "LEVEL", time, from, to, reason });
+  logRows = logRows.slice(0, 40);
+}
+function addNote(time, tag, text, cls) {
+  logRows.unshift({ kind: "NOTE", time, tag, text, cls });
   logRows = logRows.slice(0, 40);
 }
 function addLoraRow(time, p) {
@@ -199,6 +219,21 @@ function ingestOne(o, dedupe) {
   if (n.key !== null) feed.lastKey = n.key;
   feed.lastPktAt = Date.now();
   feed.count++;
+  feed.health = n.health;
+  const faults = n.invalid.map(i => ({ f: i.f, msg: `${CANON[i.f]} out of range (${i.v})` }));
+  for (const f of PAYLOAD_FIELDS) {
+    const v = n.found[f], st = feed.flat[f];
+    if (v === null) { st.v = null; st.n = 0; continue; }
+    st.n = st.v === v ? st.n + 1 : 1;
+    st.v = v;
+    if (st.n >= FLAT_N && v !== 0 && !faults.some(x => x.f === f))
+      faults.push({ f, msg: `${CANON[f]} unchanged at ${v} for ${st.n} readings (stuck sensor?)` });
+  }
+  feed.fault = faults;
+  const sig = faults.map(x => x.msg).join("; ");
+  if (sig && sig !== feed.faultSig) addNote(hms(new Date()), "FAULT", "Sensor fault: " + sig, "bad");
+  else if (!sig && feed.faultSig) addNote(hms(new Date()), "FAULT", "Sensor fault cleared", "");
+  feed.faultSig = sig;
   process(n.s, n.src, n.missingPayload, new Date());
   return true;
 }
@@ -457,7 +492,7 @@ function renderCommon() {
 
   $("tl").innerHTML = series.map(p => `<span class="${p.level}" title="${p.level}"></span>`).join("");
 
-  $("logBody").innerHTML = logRows.length ? logRows.map(logRowHtml).join("") : `<tr><td class="mute">Nothing yet.</td></tr>`;
+  renderLog();
 }
 
 function render(cur) {
@@ -467,8 +502,17 @@ function render(cur) {
 
   const reason = reasonFor(cur.chans, L);
   $("bannerText").textContent = L === "NORMAL" ? "All channels within limits" : reason.charAt(0).toUpperCase() + reason.slice(1);
-  $("bannerSub").textContent = cur.missing.length
-    ? "Missing from packet: " + cur.missing.join(", ") + " (carried forward, shown as SIM)." : "";
+  const faulty = mode === "live" ? feed.fault.map(x => x.f) : [];
+  const parts = [];
+  if (faulty.length) parts.push("Sensor fault: " + feed.fault.map(x => x.msg).join("; ") + ".");
+  if (cur.missing.length) parts.push("Missing from packet: " + cur.missing.join(", ") + " (carried forward, shown as SIM).");
+  $("bannerSub").textContent = parts.join(" ");
+  if (faulty.length && L === "NORMAL") {
+    // A failed sensor is not "within limits": show it in the strip (display only; alert logic is unchanged).
+    $("banner").dataset.lvl = "WARNING";
+    $("lvl").textContent = "FAULT";
+    $("bannerText").textContent = "Sensor fault: " + faulty.map(f => CANON[f]).join(", ");
+  }
   $("alertN").textContent = alerts;
   $("pkt").textContent = hms(cur.t);
 
@@ -479,6 +523,9 @@ function render(cur) {
   $("gUVv").textContent = cur.uv.toFixed(1);
   $("gMagv").textContent = cur.dBAvg.toFixed(1);
   $("gTempv").textContent = cur.temp.toFixed(1);
+  if (faulty.includes("uv")) $("gUVv").textContent = "FAULT";
+  if (faulty.includes("dB")) $("gMagv").textContent = "FAULT";
+  if (faulty.includes("temp")) $("gTempv").textContent = "FAULT";
 
   gauge("gUV", cur.uv, 0, 12, C.amber, [
     { f0: 0, f1: 3 / 12, color: C.ok }, { f0: 3 / 12, f1: 8 / 12, color: C.warn }, { f0: 8 / 12, f1: 1, color: C.alert }
@@ -492,13 +539,16 @@ function render(cur) {
   fillStat("gTemps", series.map(p => p.temp), 1);
 
   const inBand = cur.temp >= 0 && cur.temp <= 40;
-  renderChan([
+  const rows = [
     ["UV index", "", cur.uv.toFixed(1), cur.chans.UV],
     ["Field change", "", cur.dBAvg.toFixed(1) + " µT", cur.chans.MAGNETIC],
     ["Gamma threat", "SIM", cur.cpmAvg.toFixed(0) + " CPM", cur.chans.GAMMA],
     ["Flare index", "SIM", cur.flare.toFixed(0), cur.chans.FLARE],
     ["Node temperature", "", cur.temp.toFixed(1) + " °C", inBand ? "NORMAL" : "WARNING", inBand ? "IN BAND" : "OUT OF BAND"]
-  ]);
+  ];
+  const rowOf = { uv: 0, dB: 1, temp: 4 };
+  faulty.forEach(f => { const r = rows[rowOf[f]]; r[2] = "–"; r[3] = "ALERT"; r[4] = "FAULT"; });
+  renderChan(rows);
 
   renderCommon();
   updateFeedState();
@@ -506,9 +556,14 @@ function render(cur) {
 
 /* Timeline rows: level changes, mode changes, and the simulated LoRa packets, newest first. */
 const levelChip = l => `<span class="lv ${l}"><i class="dot"></i>${l}</span>`;
+function renderLog() {
+  $("logBody").innerHTML = logRows.length ? logRows.map(logRowHtml).join("") : `<tr><td class="mute">Nothing yet.</td></tr>`;
+}
 function logRowHtml(r) {
   const body = r.kind === "LORA"
     ? `<span class="kind">LoRa</span> packet ${r.seq} ${levelChip(r.level)}<div class="sub">UV ${r.uv} · Δ ${r.field} µT · γ ${r.cpm} · flare ${r.flare} · ${r.src}</div>`
+    : r.kind === "NOTE"
+    ? `<span class="kind ${r.cls || ""}">${r.tag}</span> ${r.text}`
     : `${r.from === "–" ? "" : levelChip(r.from) + " → "}${levelChip(r.to)}<div class="sub">${r.reason}</div>`;
   return `<tr><td class="t">${r.time}</td><td>${body}</td></tr>`;
 }
@@ -553,6 +608,19 @@ function updateFeedState() {
   const el = $("feedState");
   $("met").textContent = met(Math.floor((Date.now() - modeStart) / 1000));
   const last = series[series.length - 1];
+  const polling = mode === "live" && !!pollTimer;
+  const age = feed.count ? Math.round((Date.now() - feed.lastPktAt) / 1000) : 0;
+  const staleAfter = Math.max(10, feed.every * 3);
+  // Fix 1: when the link is lost, the telemetry is dimmed and says so, rather than showing old numbers as live.
+  const stale = polling && feed.count > 0 && (!!feed.lastErr || age > staleAfter);
+  document.body.classList.toggle("stale", stale);
+  $("noLink").hidden = !stale;
+  if (stale) $("noLink").textContent = `NO LINK · last packet ${age} s ago · values below are not current`;
+  if (stale !== feed.wasStale) {
+    addNote(hms(new Date()), "LINK", stale ? `Link lost: no packet for ${age} s` : "Link restored", stale ? "bad" : "");
+    feed.wasStale = stale;
+    renderLog();
+  }
   let text, cls, title = "";
   if (mode === "sim") {
     text = "SIM"; cls = "sim"; title = "Built-in simulation";
@@ -568,8 +636,6 @@ function updateFeedState() {
       ? "Cannot read the feed: " + feed.lastErr + ". Check the URL, that it returns JSON, and that it allows cross-origin reads."
       : "Connected. Waiting for the first reading from the feed.";
   } else {
-    const age = Math.round((Date.now() - feed.lastPktAt) / 1000);
-    const staleAfter = Math.max(10, feed.every * 3);
     if (feed.lastErr) { text = "ERROR · " + age + "s"; cls = "err"; title = feed.lastErr; }
     else if (age > staleAfter) { text = "STALE · " + age + "s"; cls = "stale"; title = "No new reading from the feed"; }
     else { text = last.src + " · " + age + "s ago"; cls = last.src === "LIVE" ? "live" : "sim"; }
@@ -577,6 +643,21 @@ function updateFeedState() {
   el.textContent = text;
   el.className = "v " + cls;
   el.title = title;
+  renderHealth();
+}
+
+/* Fix 4: device health from the packet (device name, Wi-Fi signal, uptime) and the packet count. */
+function renderHealth() {
+  const el = $("healthRow");
+  if (mode !== "live") { el.textContent = "Simulation: no device connected."; return; }
+  if (!feed.count) { el.textContent = "No device has reported yet."; return; }
+  const h = feed.health || {};
+  const parts = [h.device || "device not named"];
+  if (h.seq !== null && h.seq !== undefined) parts.push("seq " + h.seq);
+  if (h.rssi !== null && h.rssi !== undefined) parts.push("RSSI " + h.rssi + " dBm");
+  if (h.uptime_s !== null && h.uptime_s !== undefined) parts.push("up " + Math.floor(h.uptime_s / 60) + " min");
+  parts.push(feed.count + " packets");
+  el.textContent = parts.join(" · ");
 }
 
 /* ---- Modes ---- */
@@ -585,6 +666,7 @@ function resetState() {
   lastLoraAtMs = 0; lastSentLevel = "NORMAL"; trail = []; logRows = []; history = [];
   modeStart = Date.now();
   feed.lastKey = null; feed.lastPktAt = 0; feed.count = 0; feed.lastErr = ""; feed.manual = false;
+  feed.fault = []; feed.health = null; feed.flat = freshFlat(); feed.faultSig = ""; feed.wasStale = false;
 }
 
 function connectFeed() {
