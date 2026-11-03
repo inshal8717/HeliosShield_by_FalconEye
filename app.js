@@ -36,9 +36,7 @@ let lastLoraAtMs = 0, lastSentLevel = "NORMAL";
 let modeStart = Date.now();
 let simTimer = null, pollTimer = null, pollBusy = false;
 let history = [];                // every reading this session, for the CSV export
-const FLAT_N = 15;                 // the same non-zero value this many readings in a row = stuck sensor
-const freshFlat = () => ({ uv: { v: null, n: 0 }, dB: { v: null, n: 0 }, temp: { v: null, n: 0 } });
-const feed = { url: "", every: 2, lastPktAt: 0, lastKey: null, lastErr: "", count: 0, manual: false, fault: [], health: null, flat: freshFlat(), faultSig: "", wasStale: false };
+const feed = { url: "", every: 2, lastPktAt: 0, lastKey: null, lastErr: "", count: 0, manual: false, fault: [], health: null, faultSig: "", wasStale: false };
 
 /* ---- Simulation (per second, k counts from the start of the chosen event) ---- */
 function gauss() { return (Math.random() + Math.random() + Math.random() - 1.5) * 2; }
@@ -221,14 +219,6 @@ function ingestOne(o, dedupe) {
   feed.count++;
   feed.health = n.health;
   const faults = n.invalid.map(i => ({ f: i.f, msg: `${CANON[i.f]} out of range (${i.v})` }));
-  for (const f of PAYLOAD_FIELDS) {
-    const v = n.found[f], st = feed.flat[f];
-    if (v === null) { st.v = null; st.n = 0; continue; }
-    st.n = st.v === v ? st.n + 1 : 1;
-    st.v = v;
-    if (st.n >= FLAT_N && v !== 0 && !faults.some(x => x.f === f))
-      faults.push({ f, msg: `${CANON[f]} unchanged at ${v} for ${st.n} readings (stuck sensor?)` });
-  }
   feed.fault = faults;
   const sig = faults.map(x => x.msg).join("; ");
   if (sig && sig !== feed.faultSig) addNote(hms(new Date()), "FAULT", "Sensor fault: " + sig, "bad");
@@ -666,7 +656,7 @@ function resetState() {
   lastLoraAtMs = 0; lastSentLevel = "NORMAL"; trail = []; logRows = []; history = [];
   modeStart = Date.now();
   feed.lastKey = null; feed.lastPktAt = 0; feed.count = 0; feed.lastErr = ""; feed.manual = false;
-  feed.fault = []; feed.health = null; feed.flat = freshFlat(); feed.faultSig = ""; feed.wasStale = false;
+  feed.fault = []; feed.health = null; feed.faultSig = ""; feed.wasStale = false;
 }
 
 function connectFeed() {

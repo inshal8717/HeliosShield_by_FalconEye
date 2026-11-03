@@ -60,7 +60,6 @@ Or use the helper: `python3 tools/send_sim.py --url https://YOUR-APP.vercel.app/
 
 ### Fault rules
 - **Out of range:** UV outside 0 to 15, field change outside ±100 µT, temperature outside −40 to 85 °C, gamma outside 0 to 1000 CPM, flare outside 0 to 100. The value is not used: the gauge reads FAULT, the status strip shows FAULT, and the timeline logs it.
-- **Stuck sensor:** the same non-zero value 15 readings in a row. Flagged the same way. Zero is exempt (UV is 0 in the dark).
 - **Link lost:** no new packet for 10 s (or 3 poll intervals, if longer). The telemetry dims, a NO LINK note shows the packet age, and the timeline logs "Link lost" and later "Link restored".
 
 ### Tinkercad
