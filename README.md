@@ -1,14 +1,34 @@
-# FalconEye: Helios Shield
+# FalconEye Helios Shield
 
 **Team:** FalconEye (SatForge 2026, National Space Academy)
 **Mission name:** Helios Shield
 **Mission:** UV and magnetic-disturbance monitoring with ground-control alerts
 
-![Helios Shield prototype with the live dashboard](docs/images/intro.jpg)
+<p align="center">
+  <img src="docs/images/intro.jpg" alt="Helios Shield prototype beside the live dashboard" width="360">
+</p>
 
-Helios Shield is a 1U CubeSat engineering model. The hardware measures UV and magnetic-field change, sends readings over Wi-Fi to a cloud endpoint, and a web dashboard shows the readings and alert levels.
+## Introduction
 
-**Scope:** ground-based prototype. Not flown. The LoRa radio is not implemented. Battery power, solar charging and calibrated UV are not yet tested. See [Known limits](#known-limits).
+Small satellites carry little environmental monitoring, so their operators cannot see hazards such as UV and magnetic disturbance building up. Helios Shield is a low-cost 1U CubeSat engineering model. It measures UV and magnetic-field change, logs the readings on board, sends them to the ground over Wi-Fi, and warns the operator within seconds when a limit is crossed.
+
+**What this repository shows:** the full chain from sensor to ground dashboard, working on the bench.
+
+**What it does not claim:** flight operation, a calibrated UV index, or a space-weather forecast. The LoRa radio is not implemented, and battery, solar and charging power are not yet tested. See [Known limits](#known-limits).
+
+### How it works
+
+```
+Sensors (UV, magnetometer, temperature, IMU)
+        │
+      ESP32 ──────────► microSD log (on board)
+        │
+   Wi-Fi, HTTPS POST every 2 s
+        │
+  Vercel API (/api/telemetry) ──► Upstash Redis (latest packet)
+        │
+  Dashboard (GET every 2 s) ──► gauges, alert levels, timeline
+```
 
 ## Contents
 - [Reproduce from scratch](#reproduce-from-scratch)
@@ -217,6 +237,10 @@ The UV channel reads a biased voltage at the resistor junction, in mV. That volt
 **Current state:** one low point is captured (about 345.6 mV at UV index 0). The high point was rejected because the signal span was too small. The UV index is therefore disabled, and packets omit `uv_index`.
 
 ## Dashboard
+
+![Dashboard in live-feed mode, from the final report](docs/images/dashboard_report.png)
+
+*Figure: live-feed dashboard from the final report. The "SIMULATED DATA" label and the UV fallback are software caveats, not proof that the temperature or magnetometer values are synthetic.*
 
 Live copy: https://helioshield-iota.vercel.app (the last deployed build of this repository)
 
