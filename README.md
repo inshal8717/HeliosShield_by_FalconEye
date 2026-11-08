@@ -72,7 +72,7 @@ Details are in [Verification](docs/verification.md) and [Limitations](docs/limit
 3. Fill in the four values at the top of the sketch and flash it ([Build guide, step 3](docs/build-guide.md#3-configure-and-flash-the-firmware)).
 4. Open the dashboard, set **Source** to **Live feed**, and press **Connect**.
 
-To try the dashboard with no hardware, open `index.html` in a browser. It starts in Simulation mode.
+To try the dashboard with no hardware, open `index.html` in a browser. It starts in Simulation mode. The last deployed build is at https://helioshield-iota.vercel.app.
 
 ## Repository map
 
